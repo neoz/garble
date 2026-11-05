@@ -96,8 +96,24 @@ func ModifyValue() {
 	println("New value of a:", a)
 }
 
+// charSum keeps its running sum in a loop phi. Trash blocks used to leave a
+// stale predecessor behind, so block splitting could move the phi assignment
+// before the addition and the loop silently lost its updates.
+//
+//garble:controlflow flatten_passes=2 junk_jumps=10 block_splits=10 trash_blocks=10
+func charSum(s string) int {
+	sum := 0
+	for _, c := range s {
+		sum += int(c)
+	}
+	return sum
+}
+
 //garble:controlflow flatten_passes=1 junk_jumps=10 block_splits=10 trash_blocks=32
 func main() {
+	if got := charSum("abcd"); got != 394 {
+		panic("loop phi values changed")
+	}
 	// Reference to the unexported interface triggers creation of a new interface
 	// with a list of all functions of the private interface
 	endian := binary.LittleEndian

@@ -172,7 +172,10 @@ func main() {}
 		name   string
 		insert func(*ssa.Function, *mathrand.Rand)
 	}{
-		{"trash_blocks", func(f *ssa.Function, r *mathrand.Rand) { addTrashBlockMarkers(f, 16, r) }},
+		{"trash_blocks", func(f *ssa.Function, r *mathrand.Rand) {
+			opaque, _ := newOpaquePredicates(r)
+			addTrashBlockMarkers(f, 16, opaque, make(map[ssa.Value]ast.Expr), r)
+		}},
 		{"junk_jumps", func(f *ssa.Function, r *mathrand.Rand) { addJunkBlocks(f, 16, r) }},
 	}
 	for _, test := range tests {

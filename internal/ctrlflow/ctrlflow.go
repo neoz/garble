@@ -27,11 +27,13 @@ const (
 	defaultJunkJumps     = 0
 	defaultFlattenPasses = 1
 	defaultTrashBlocks   = 0
+	defaultDispatchers   = 1
 
 	maxBlockSplits   = math.MaxInt32
 	maxJunkJumps     = 256
 	maxFlattenPasses = 4
 	maxTrashBlocks   = 1024
+	maxDispatchers   = 16
 
 	minTrashBlockStmts = 1
 	maxTrashBlockStmts = 32
@@ -106,6 +108,8 @@ func parseDirective(directive string) (directiveParamMap, bool) {
 // flatten_passes - controls number of passes of control flow flattening. Have exponential complexity and more than 3 passes are not recommended in most cases.
 // junk_jumps - controls how many junk jumps are added. It does not affect final binary by itself, but together with flattening linearly increases complexity.
 // block_splits - controls number of times largest block must be splitted. Together with flattening improves obfuscation of long blocks without branches.
+// dispatchers - controls how many independent dispatchers each flattening pass creates. Every jump goes through a random one of them.
+// trash_blocks - controls how many unreachable blocks of trash code are added, each guarded by an opaque predicate.
 func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfRand *mathrand.Rand) (newFileName string, newFile *ast.File, affectedFiles []*ast.File, err error) {
 	var ssaFuncs []*ssa.Function
 	var ssaParams []directiveParamMap
@@ -179,6 +183,7 @@ func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfR
 	}
 
 	var trashGen *trashGenerator
+	var opaque *opaquePredicates
 
 	for idx, ssaFunc := range ssaFuncs {
 		params := ssaParams[idx]
@@ -200,17 +205,33 @@ func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfR
 		}
 		flattenHardening := params.StringSlice("flatten_hardening")
 
+		dispatcherCount, err := params.GetInt("dispatchers", defaultDispatchers, maxDispatchers)
+		if err != nil {
+			return "", nil, nil, fmt.Errorf("controlflow directive on %s: %w", ssaFunc, err)
+		}
+		if dispatcherCount < 1 {
+			return "", nil, nil, fmt.Errorf("controlflow directive on %s: flag \"dispatchers\" must be at least 1", ssaFunc)
+		}
+
 		trashBlockCount, err := params.GetInt("trash_blocks", defaultTrashBlocks, maxTrashBlocks)
 		if err != nil {
 			return "", nil, nil, fmt.Errorf("controlflow directive on %s: %w", ssaFunc, err)
 		}
 		if trashBlockCount > 0 && trashGen == nil {
 			trashGen = newTrashGenerator(ssaPkg.Prog, funcConfig.ImportNameResolver, obfRand)
+			var decl ast.Decl
+			opaque, decl = newOpaquePredicates(obfRand)
+			newFile.Decls = append(newFile.Decls, decl)
 		}
+
+		// Because of ssa package api limitations, opaque predicates and the hardening of the
+		// control flow flattening dispatcher are implemented during converting
+		// by replacing placeholder values with ast expressions.
+		ssaRemap := make(map[ssa.Value]ast.Expr)
 
 		applyObfuscation := func(ssaFunc *ssa.Function) []dispatcherInfo {
 			if trashBlockCount > 0 {
-				addTrashBlockMarkers(ssaFunc, trashBlockCount, obfRand)
+				addTrashBlockMarkers(ssaFunc, trashBlockCount, opaque, ssaRemap, obfRand)
 			}
 			for range split {
 				if !applySplitting(ssaFunc, obfRand) {
@@ -222,9 +243,7 @@ func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfR
 			}
 			var dispatchers []dispatcherInfo
 			for range passes {
-				if info := applyFlattening(ssaFunc, obfRand); info != nil {
-					dispatchers = append(dispatchers, info)
-				}
+				dispatchers = append(dispatchers, applyFlattening(ssaFunc, dispatcherCount, obfRand)...)
 			}
 			fixBlockIndexes(ssaFunc)
 			return dispatchers
@@ -235,13 +254,9 @@ func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfR
 			dispatchers = append(dispatchers, applyObfuscation(anonFunc)...)
 		}
 
-		// Because of ssa package api limitations, implementation of hardening for control flow flattening dispatcher
-		// is implemented during converting by replacing key values with obfuscated ast expressions
 		var prologues []ast.Stmt
 		if len(flattenHardening) > 0 && len(dispatchers) > 0 {
 			hardening := newDispatcherHardening(flattenHardening)
-
-			ssaRemap := make(map[ssa.Value]ast.Expr)
 			for _, dispatcher := range dispatchers {
 				decl, stmt := hardening.Apply(dispatcher, ssaRemap, obfRand)
 				if decl != nil {
@@ -251,15 +266,14 @@ func Obfuscate(fset *token.FileSet, ssaPkg *ssa.Package, files []*ast.File, obfR
 					prologues = append(prologues, stmt)
 				}
 			}
-			funcConfig.SsaValueRemap = ssaRemap
-		} else {
-			funcConfig.SsaValueRemap = nil
 		}
+		funcConfig.SsaValueRemap = ssaRemap
 
 		funcConfig.MarkerInstrCallback = nil
 		if trashBlockCount > 0 {
 			funcConfig.MarkerInstrCallback = func(m map[string]types.Type) []ast.Stmt {
-				return trashGen.Generate(minTrashBlockStmts+obfRand.Intn(maxTrashBlockStmts-minTrashBlockStmts), m)
+				stmts := trashGen.Generate(minTrashBlockStmts+obfRand.Intn(maxTrashBlockStmts-minTrashBlockStmts), m)
+				return append(stmts, opaque.Clobber())
 			}
 		}
 

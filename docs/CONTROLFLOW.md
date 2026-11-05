@@ -169,6 +169,14 @@ This is the most important parameter without which the other parameters have no 
 
 > Warning: Unlike junk jumps, this parameter increases control flow complexity non-linearly. In most cases we do not recommend specifying a value greater than 3. Check [Benchmark](#complexity-benchmark)
 
+State values are random 31-bit integers. Each dispatcher randomly uses one of two layouts: a chain of equality checks in random order, or a binary search tree with random split points, pivots and comparison operators (`<`, `<=`, `>`, `>=`). Branches of the dispatcher which can never be taken lead to random real blocks.
+
+Parameter: `dispatchers` (default: `1`, maximum: `16`)
+
+Number of independent dispatchers created by every flattening pass. Each jump goes through a random one of them, and each dispatcher has its own state variable, layout and [hardening](#control-flow-hardening), so there is no single dispatcher to analyse.
+
+The example output below predates random state values and dispatcher layouts.
+
 
 Input:
 ```go
@@ -511,6 +519,8 @@ Parameter: `trash_blocks` (default: `0`, maximum: `1024`)
 > Warning: this param affects resulting binary only when used in combination with [flattening](#control-flow-flattening)
 
 Trash blocks generator generates blocks that will never be called. Trash blocks contain random function calls and random variable assignments. The purpose of this is to create a large number of references to different methods and local variables and in combination with other controlflow obfuscation parameters it helps to effectively hide the real code.
+
+Each trash block is guarded by an opaque predicate: a condition with a fixed result that the compiler cannot evaluate, such as `(x*(x+1))&1 != 0` or `(x|y)-(x&y) != x^y`, where `x` and `y` are package-level variables. Trash blocks also assign to these variables, so they cannot be proven constant. The identities hold under integer overflow. The example output below predates opaque predicates.
 
 The generator does not add new dependencies to the project, it uses only existing direct or indirect dependencies. In the following example, the `fmt` package implicitly imports the `io` and `os` packages
 Input:

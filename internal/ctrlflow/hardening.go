@@ -36,9 +36,8 @@ func getRandomName(rnd *mathrand.Rand) string {
 	return "_garble" + strconv.FormatUint(rnd.Uint64(), 32)
 }
 
-// generateKeys is used to generate a list of pseudo-random unique keys.
-// Blacklist is needed to ensure that the result of a xor operation is not zero,
-// which can lead to incorrect obfuscation of the control flow.
+// generateKeys is used to generate a list of pseudo-random unique non-zero keys,
+// none of which is in blacklistedKeys.
 func generateKeys(count int, blacklistedKeys []int, rnd *mathrand.Rand) []int {
 	m := make(map[int]bool, count)
 	for _, i := range blacklistedKeys {
@@ -85,12 +84,8 @@ func (xorHardening) Apply(dispatcher []cfgInfo, ssaRemap map[ssa.Value]ast.Expr,
 		globalKey ^= int(b)
 	}
 
-	newKeys := generateKeys(len(dispatcher), []int{globalKey}, rnd)
-	for i, info := range dispatcher {
-		k := newKeys[i]
-
-		ssaRemap[info.CompareVar] = ah.IntLit(k ^ globalKey)
-		ssaRemap[info.StoreVar] = &ast.ParenExpr{X: &ast.BinaryExpr{X: ast.NewIdent(localKeyName), Op: token.XOR, Y: ah.IntLit(k)}}
+	for _, info := range dispatcher {
+		ssaRemap[info.StoreVar] = &ast.ParenExpr{X: &ast.BinaryExpr{X: ast.NewIdent(localKeyName), Op: token.XOR, Y: ah.IntLit(info.Key ^ globalKey)}}
 	}
 
 	// Global key decryption code:
@@ -170,14 +165,10 @@ func (delegateTableHardening) Apply(dispatcher []cfgInfo, ssaRemap map[ssa.Value
 		delegateIndexes[i] = delegateIdx
 		delegateKeys[i] = int(key[delegateKeyIdxs[delegateIdx]]) ^ delegateLocalKeys[delegateIdx]
 	}
-	newKeys := generateKeys(len(dispatcher), delegateKeys, rnd)
 	globalTableName := getRandomName(rnd)
 	for i, info := range dispatcher {
-		k, delegateIdx, delegateKey := newKeys[i], delegateIndexes[i], delegateKeys[i]
-		encryptedKey := k ^ delegateKey
-
-		ssaRemap[info.CompareVar] = ah.IntLit(k)
-		ssaRemap[info.StoreVar] = ah.CallExpr(ah.IndexExprByExpr(ast.NewIdent(globalTableName), ah.IntLit(delegateIdx)), ah.IntLit(encryptedKey))
+		encryptedKey := info.Key ^ delegateKeys[i]
+		ssaRemap[info.StoreVar] = ah.CallExpr(ah.IndexExprByExpr(ast.NewIdent(globalTableName), ah.IntLit(delegateIndexes[i])), ah.IntLit(encryptedKey))
 	}
 
 	delegatesAst := make([]ast.Expr, delegateCount)

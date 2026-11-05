@@ -109,10 +109,34 @@ func charSum(s string) int {
 	return sum
 }
 
+// collatzSteps exercises multiple dispatchers per pass, the dispatcher layouts
+// and opaque predicates guarding trash blocks.
+//
+//garble:controlflow flatten_passes=2 junk_jumps=16 block_splits=16 trash_blocks=16 dispatchers=max flatten_hardening=xor,delegate_table
+func collatzSteps(n int) int {
+	steps := 0
+	for n != 1 {
+		switch {
+		case n%2 == 0:
+			n /= 2
+		case n%3 == 0:
+			n = 3*n + 1
+		default:
+			n = 3*n + 1
+			steps += 0
+		}
+		steps++
+	}
+	return steps
+}
+
 //garble:controlflow flatten_passes=1 junk_jumps=10 block_splits=10 trash_blocks=32
 func main() {
 	if got := charSum("abcd"); got != 394 {
 		panic("loop phi values changed")
+	}
+	if got := collatzSteps(27); got != 111 {
+		panic("collatzSteps(27) changed")
 	}
 	// Reference to the unexported interface triggers creation of a new interface
 	// with a list of all functions of the private interface

@@ -332,51 +332,57 @@ func obfuscateString(or *obfRand, data string) *ast.CallExpr {
 	block := obf.obfuscate(or.rnd, plainDataWithJunkBytes, extKeys)
 	params, args := extKeysToParams(or, extKeys)
 
-	// Generate unique cast bytes to string function and hide it using proxyDispatcher:
-	//
-	// func(x []byte) string {
-	//		return string(x[<splitIdx>:<splitIdx+len(plainData)>])
-	//	}
-	funcTyp := &ast.FuncType{
-		Params: &ast.FieldList{List: []*ast.Field{{
-			Type: ah.ByteSliceType(),
-		}}},
-		Results: &ast.FieldList{List: []*ast.Field{{
-			Type: ast.NewIdent("string"),
-		}}},
+	// The decoded data still has junk bytes around the real string, which the
+	// slice data[low:high] drops. We vary how the []byte is turned back into a
+	// string so that the decoder has no single recognisable shape, which is
+	// what tools like GoStringUngarbler key on. All three variants keep the
+	// decoder lifted, so literal-heavy owners still avoid inlining blowup.
+	low, high := splitIdx, splitIdx+len(plainData)
+	switch or.rnd.Intn(3) {
+	case 0:
+		// The string is built by a separate caster function, itself hidden in
+		// the proxy tree and passed in as a parameter:
+		//
+		//	func(x []byte) string { return string(x[low:high]) }
+		funcTyp := &ast.FuncType{
+			Params:  &ast.FieldList{List: []*ast.Field{{Type: ah.ByteSliceType()}}},
+			Results: &ast.FieldList{List: []*ast.Field{{Type: ast.NewIdent("string")}}},
+		}
+		funcVal := &ast.FuncLit{
+			Type: &ast.FuncType{
+				Params:  &ast.FieldList{List: []*ast.Field{{Names: []*ast.Ident{ast.NewIdent("x")}, Type: ah.ByteSliceType()}}},
+				Results: &ast.FieldList{List: []*ast.Field{{Type: ast.NewIdent("string")}}},
+			},
+			Body: ah.BlockStmt(ah.ReturnStmt(ah.CallExprByName("string", sliceLowHigh("x", low, high)))),
+		}
+		castFunc := or.liftFuncValue(funcVal)
+		hiddenCastFunc := or.proxyDispatcher.HideValue(castFunc, funcTyp)
+		const castParamName = "garbleStringCaster"
+		params.List = append(params.List, &ast.Field{
+			Names: []*ast.Ident{ast.NewIdent(castParamName)},
+			Type:  cloneGeneratedType(funcTyp),
+		})
+		args = append(args, hiddenCastFunc)
+		block.List = append(block.List, ah.ReturnStmt(ah.CallExpr(ast.NewIdent(castParamName), ast.NewIdent("data"))))
+		return or.liftCall(params, ast.NewIdent("string"), block, args)
+	case 1:
+		// The decoder converts to string inline, with no caster function:
+		//
+		//	return string(data[low:high])
+		block.List = append(block.List, ah.ReturnStmt(ah.CallExprByName("string", sliceLowHigh("data", low, high))))
+		return or.liftCall(params, ast.NewIdent("string"), block, args)
+	default:
+		// The decoder returns the raw []byte, and the slice and the string
+		// conversion happen at the call site: string(decoder(...)[low:high]).
+		block.List = append(block.List, ah.ReturnStmt(ast.NewIdent("data")))
+		call := or.liftCall(params, ah.ByteSliceType(), block, args)
+		return ah.CallExprByName("string", &ast.SliceExpr{X: call, Low: ah.IntLit(low), High: ah.IntLit(high)})
 	}
-	funcVal := &ast.FuncLit{
-		Type: &ast.FuncType{
-			Params: &ast.FieldList{List: []*ast.Field{{
-				Names: []*ast.Ident{ast.NewIdent("x")},
-				Type:  ah.ByteSliceType(),
-			}}},
-			Results: &ast.FieldList{List: []*ast.Field{{
-				Type: ast.NewIdent("string"),
-			}}},
-		},
-		Body: ah.BlockStmt(
-			ah.ReturnStmt(
-				ah.CallExprByName("string",
-					&ast.SliceExpr{
-						X:    ast.NewIdent("x"),
-						Low:  ah.IntLit(splitIdx),
-						High: ah.IntLit(splitIdx + len(plainData)),
-					},
-				),
-			),
-		),
-	}
-	castFunc := or.liftFuncValue(funcVal)
-	hiddenCastFunc := or.proxyDispatcher.HideValue(castFunc, funcTyp)
-	const castParamName = "garbleStringCaster"
-	params.List = append(params.List, &ast.Field{
-		Names: []*ast.Ident{ast.NewIdent(castParamName)},
-		Type:  cloneGeneratedType(funcTyp),
-	})
-	args = append(args, hiddenCastFunc)
-	block.List = append(block.List, ah.ReturnStmt(ah.CallExpr(ast.NewIdent(castParamName), ast.NewIdent("data"))))
-	return or.liftCall(params, ast.NewIdent("string"), block, args)
+}
+
+// sliceLowHigh builds the expression name[low:high].
+func sliceLowHigh(name string, low, high int) *ast.SliceExpr {
+	return &ast.SliceExpr{X: ast.NewIdent(name), Low: ah.IntLit(low), High: ah.IntLit(high)}
 }
 
 func obfuscateByteSlice(or *obfRand, isPointer bool, data []byte) *ast.CallExpr {

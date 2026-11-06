@@ -24,6 +24,10 @@ const (
 	lowProb    externalKeyProbability = 0.4
 	normalProb externalKeyProbability = 0.6
 	highProb   externalKeyProbability = 0.8
+
+	// mixedKeyProb is the probability of deriving an external key at run time
+	// via the file's keyMixer, rather than passing it as a constant.
+	mixedKeyProb externalKeyProbability = 0.5
 )
 
 func (r externalKeyProbability) Try(rand *mathrand.Rand) bool {
@@ -67,6 +71,8 @@ var (
 		split{},
 		shuffle{},
 		seed{},
+		stream{},
+		layered{},
 	}
 
 	// CheapObfuscators contains obfuscators safe to use on large literals.
@@ -74,6 +80,8 @@ var (
 	CheapObfuscators = []obfuscator{
 		simple{},
 		swap{},
+		stream{},
+		layered{},
 	}
 
 	TestObfuscator         string
@@ -167,7 +175,8 @@ func randExtKeys(rand *mathrand.Rand) []*externalKey {
 }
 
 // extKeysToParams converts a list of extKeys into a parameter list and argument expressions for function calls.
-// It ensures unused keys have placeholder names and sometimes use proxyDispatcher.HideValue for key values
+// It ensures unused keys have placeholder names, and sometimes derives key values
+// at run time via the keyMixer or hides them with proxyDispatcher.HideValue.
 func extKeysToParams(objRand *obfRand, keys []*externalKey) (params *ast.FieldList, args []ast.Expr) {
 	params = &ast.FieldList{}
 	for _, key := range keys {
@@ -177,9 +186,14 @@ func extKeysToParams(objRand *obfRand, keys []*externalKey) (params *ast.FieldLi
 		}
 		params.List = append(params.List, ah.Field(key.Type(), name))
 
-		var extKeyExpr ast.Expr = ah.UintLit(key.value)
-		if lowProb.Try(objRand.rnd) {
-			extKeyExpr = objRand.proxyDispatcher.HideValue(extKeyExpr, ast.NewIdent(key.typ))
+		var extKeyExpr ast.Expr
+		switch {
+		case mixedKeyProb.Try(objRand.rnd):
+			extKeyExpr = objRand.mixedKeyExpr(key)
+		case lowProb.Try(objRand.rnd):
+			extKeyExpr = objRand.proxyDispatcher.HideValue(ah.UintLit(key.value), ast.NewIdent(key.typ))
+		default:
+			extKeyExpr = ah.UintLit(key.value)
 		}
 		args = append(args, extKeyExpr)
 	}
@@ -269,6 +283,7 @@ type obfRand struct {
 	liftedFuncSeq   int
 	liftedFuncs     []ast.Decl
 	proxyDispatcher *proxyDispatcher
+	mixer           *keyMixer
 }
 
 func newObfRand(rand *mathrand.Rand, file *ast.File, nameFunc NameProviderFunc) *obfRand {

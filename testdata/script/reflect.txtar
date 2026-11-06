@@ -2,8 +2,10 @@ exec garble build
 exec ./main
 cmp stdout main.stdout
 
-! binsubstr main$exe 'garble_main.go' 'test/main' 'importedpkg.','IndirectObfuscated' 'IndirectNamedWithoutReflect' 'AliasIndirectNamedWithReflect' 'AliasIndirectNamedWithoutReflect' 'FmtTypeField' 'LocalObfuscated'
-binsubstr main$exe 'ReflectInDefined' 'ExportedField2' 'unexportedField2' 'IndirectUnobfuscated' 'IndirectNamedWithReflect' 'ForeignNamedType' 'DownstreamField' 'SiblingField'
+# Reflected names are restored at run time (see stdout above) but no longer
+# appear in the binary as plaintext, as the _originalNamePairs table is now
+# encrypted. See reflectMainPostPatch.
+! binsubstr main$exe 'garble_main.go' 'test/main' 'importedpkg.','IndirectObfuscated' 'IndirectNamedWithoutReflect' 'AliasIndirectNamedWithReflect' 'AliasIndirectNamedWithoutReflect' 'FmtTypeField' 'LocalObfuscated' 'ReflectInDefined' 'ExportedField2' 'unexportedField2' 'IndirectUnobfuscated' 'IndirectNamedWithReflect' 'ForeignNamedType' 'DownstreamField' 'SiblingField'
 stderr '^\*main\.StoredEarly$'
 stderr '^\*main\.TaintedLate$'
 stderr '^\*main\.FirstParam$'

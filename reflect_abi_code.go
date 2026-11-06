@@ -21,14 +21,35 @@ package main
 
 // Injected code below this line.
 
-// Each pair is the obfuscated and then the real name.
-// The pairs are sorted by obfuscated name, lexicographically.
-var _originalNamePairs = []string{}
+// _originalNameData holds the obfuscated-then-real name pairs, sorted by
+// obfuscated name. reflectMainPostPatch fills it in with: a 4-byte big-endian
+// seed, then, xor-encrypted with a keystream from that seed, each name as a
+// 4-byte big-endian length followed by its bytes. Encrypting keeps the real
+// names out of the binary as plaintext; they are restored into
+// _originalNamePairs at init. Empty when nothing is reflected.
+var _originalNameData = ""
+
+var _originalNamePairs []string
 
 var _originalNamesReplacer *_genericReplacer
 
 //disabledgo:linkname _originalNamesInit internal/abi._originalNamesInit
 func _originalNamesInit() {
+	if len(_originalNameData) > 4 {
+		data := []byte(_originalNameData)
+		state := uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+		data = data[4:]
+		for i := range data {
+			state = state*1664525 + 1013904223
+			data[i] ^= byte(state >> 24)
+		}
+		for i := 0; i < len(data); {
+			n := int(data[i])<<24 | int(data[i+1])<<16 | int(data[i+2])<<8 | int(data[i+3])
+			i += 4
+			_originalNamePairs = append(_originalNamePairs, string(data[i:i+n]))
+			i += n
+		}
+	}
 	_originalNamesReplacer = _makeGenericReplacer(_originalNamePairs)
 }
 

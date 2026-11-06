@@ -66,16 +66,53 @@ func reflectMainPrePatch(path string) (string, error) {
 // reflectMainPostPatch populates the name mapping with the final obfuscated->real name
 // mappings after all packages have been analyzed.
 func reflectMainPostPatch(file []byte, lpkg *listedPackage, pkg pkgCache) []byte {
-	obfVarName := hashWithPackage(lpkg, "_originalNamePairs")
-	namePairs := fmt.Appendf(nil, "%s = []string{", obfVarName)
+	// The injected var is renamed by the obfuscator like any other identifier,
+	// so match its hashed name. Replace its empty string literal with the
+	// encrypted name data; see _originalNamesInit for the format. We always go
+	// through bytes.Replace, even with no names, so that the returned slice is
+	// a fresh copy rather than printFile's reused buffer.
+	obfVarName := hashWithPackage(lpkg, "_originalNameData")
+	placeholder := fmt.Appendf(nil, "%s = \"\"", obfVarName)
 
 	keys := slices.Sorted(maps.Keys(pkg.ReflectObjectNames))
-	namePairsFilled := bytes.Clone(namePairs)
+	pairs := make([]string, 0, 2*len(keys))
 	for _, obf := range keys {
-		namePairsFilled = fmt.Appendf(namePairsFilled, "%q, %q,", obf, pkg.ReflectObjectNames[obf])
+		pairs = append(pairs, obf, pkg.ReflectObjectNames[obf])
 	}
+	filled := fmt.Appendf(nil, "%s = %q", obfVarName, encodeReflectNames(pairs, reflectNameSeed(lpkg)))
+	return bytes.Replace(file, placeholder, filled, 1)
+}
 
-	return bytes.Replace(file, namePairs, namePairsFilled, 1)
+// reflectNameSeed derives a per-build keystream seed from the package's action
+// ID, so the encrypted name data differs between builds with different seeds.
+func reflectNameSeed(lpkg *listedPackage) uint32 {
+	seed := uint32(2166136261)
+	for _, b := range lpkg.GarbleActionID {
+		seed = (seed ^ uint32(b)) * 16777619
+	}
+	return seed
+}
+
+// encodeReflectNames serialises the name pairs into the format decoded by
+// _originalNamesInit: a 4-byte seed, then a keystream-xored run of 4-byte
+// length-prefixed strings.
+func encodeReflectNames(pairs []string, seed uint32) string {
+	if len(pairs) == 0 {
+		return ""
+	}
+	var frames []byte
+	for _, s := range pairs {
+		n := len(s)
+		frames = append(frames, byte(n>>24), byte(n>>16), byte(n>>8), byte(n))
+		frames = append(frames, s...)
+	}
+	state := seed
+	for i := range frames {
+		state = state*1664525 + 1013904223
+		frames[i] ^= byte(state >> 24)
+	}
+	out := []byte{byte(seed >> 24), byte(seed >> 16), byte(seed >> 8), byte(seed)}
+	return string(append(out, frames...))
 }
 
 type reflectInspector struct {

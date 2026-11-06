@@ -174,25 +174,8 @@ func buildidOf(path string) (string, error) {
 	return string(out), nil
 }
 
-var (
-	// Hashed names are base64-encoded.
-	// Go names can only be letters, numbers, and underscores.
-	// This means we can use base64's URL encoding, minus '-',
-	// which is later replaced with a duplicate 'a'.
-	// Such a lossy encoding is fine, since we never decode hashes.
-	// We don't need padding either, as we take a short prefix anyway.
-	nameBase64 = base64.URLEncoding.WithPadding(base64.NoPadding)
-
-	b64NameBuffer [12]byte // nameBase64.EncodedLen(neededSumBytes) = 12
-)
-
-// These funcs mimic the unicode package API, but byte-based since we know
-// base64 is all ASCII.
-
-func isDigit(b byte) bool { return '0' <= b && b <= '9' }
-func isLower(b byte) bool { return 'a' <= b && b <= 'z' }
-func isUpper(b byte) bool { return 'A' <= b && b <= 'Z' }
-func toLower(b byte) byte { return b + ('a' - 'A') }
+// toUpper uppercases an ASCII letter. It is byte-based since hashed names are
+// built only from the ASCII letters in nameConsonants and nameVowels.
 func toUpper(b byte) byte { return b - ('a' - 'A') }
 
 func runtimeHashWithCustomSalt(salt []byte) uint32 {
@@ -261,49 +244,35 @@ func hashWithStruct(strct *types.Struct, field *types.Var) string {
 	return hashWithCustomSalt(salt, field.Name())
 }
 
-// minHashLength and maxHashLength define the range for the number of base64
-// characters to use for the final hashed name.
+// Hashed names are rendered as a run of pronounceable syllables rather than
+// base64, so that they read like ordinary Go identifiers instead of the
+// high-entropy base64 strings which make a garbled binary easy to fingerprint.
 //
-// minHashLength needs to be long enough to realistically avoid hash collisions,
-// but maxHashLength should be short enough to not bloat binary sizes.
-// The namespace for collisions is generally a single package, since
-// that's where most hashed names are namespaced to.
+// Each syllable encodes one checksum byte, with no loss, by splitting it into
+// a consonant from nameConsonants and an ending from nameVowels. A name uses
+// minSyllables to maxSyllables syllables, chosen from a checksum byte, so it
+// carries 32 to 48 bits.
 //
-// Using a "hash collision" formula, and taking a generous estimate of a
-// package having 10k names, we get the following probabilities.
-// Most packages will have far fewer names, but some packages are huge,
-// especially generated ones.
-//
-// We also have slightly fewer bits in practice, since the base64
-// charset has 'z' twice, and the first base64 char is coerced into a
-// valid Go identifier. So we must be conservative.
-// Remember that base64 stores 6 bits per encoded byte.
-// The probability numbers are approximated.
-//
-//	length (base64) | length (bits) | collision probability
-//	-------------------------------------------------------
-//	       4               24                   ~95%
-//	       5               30                    ~4%
-//	       6               36                 ~0.07%
-//	       7               42                ~0.001%
-//	       8               48              ~0.00001%
-//
-// We want collisions to be practically impossible, so the hashed names end up
-// with lengths evenly distributed between 6 and 12. Naively, this results in an
-// average length of 9, which has a chance well below 1 in a million even when a
-// package has thousands of obfuscated names.
-//
-// These numbers are also chosen to keep obfuscated binary sizes reasonable.
-// For example, increasing the average length of 9 by 1 results in roughly a 1%
-// increase in binary sizes.
+// The collision namespace is generally a single package, since that's where
+// most hashed names are namespaced to. With a generous estimate of 10k names
+// in one package, 32 bits gives roughly a 1% chance of any collision and 48
+// bits well under one in a million; most packages have far fewer names. A
+// collision would fail the build loudly with a duplicate name, never silently.
 const (
-	minHashLength = 6
-	maxHashLength = 12
+	minSyllables = 4
+	maxSyllables = 6
 
-	// At most we'll need maxHashLength base64 characters,
-	// so 9 checksum bytes are enough for that purpose,
-	// which is nameBase64.DecodedLen(12) being rounded up.
-	neededSumBytes = 9
+	// Checksum bytes we read: one per syllable, plus one for the count.
+	neededSumBytes = maxSyllables + 1
+)
+
+// nameConsonants and nameVowels are indexed by the high and low nibble of a
+// checksum byte, so both must hold exactly 16 entries. They avoid q, w, x and
+// y to stay easy to read. Every entry is made only of letters, so a name is
+// always a valid identifier.
+var (
+	nameConsonants = [16]string{"b", "c", "d", "f", "g", "h", "j", "k", "l", "m", "n", "p", "r", "s", "t", "v"}
+	nameVowels     = [16]string{"a", "e", "i", "o", "u", "an", "en", "in", "on", "un", "ar", "er", "or", "al", "el", "us"}
 )
 
 // randomName generates a random name derived from the given baseName, using the provided random source.
@@ -335,45 +304,23 @@ func hashWithCustomSalt(salt []byte, name string) string {
 	io.WriteString(hasher, name)
 	sum := hasher.Sum(sumBuffer[:0])
 
-	// The byte after neededSumBytes is never used as part of the name,
-	// but it is still deterministic and hard to predict,
-	// so it provides us with useful randomness between 0 and 255.
-	// We want the number to be between 0 and hashLenthRange-1 as well,
-	// so we use a remainder operation.
-	hashLengthRandomness := sum[neededSumBytes] % ((maxHashLength - minHashLength) + 1)
-	hashLength := minHashLength + hashLengthRandomness
+	// sum[maxSyllables] is not used for a syllable, but it is still
+	// deterministic and hard to predict, so we use it to pick the syllable
+	// count evenly between minSyllables and maxSyllables.
+	count := minSyllables + int(sum[maxSyllables])%(maxSyllables-minSyllables+1)
 
-	nameBase64.Encode(b64NameBuffer[:], sum[:neededSumBytes])
-	b64Name := b64NameBuffer[:hashLength]
+	var b strings.Builder
+	for i := range count {
+		b.WriteString(nameConsonants[sum[i]>>4])
+		b.WriteString(nameVowels[sum[i]&0xf])
+	}
+	hashName := []byte(b.String())
 
-	// Even if we are hashing a package path, which is not an identifier,
-	// we still want the result to be a valid identifier,
-	// since we'll use it as the package name too.
-	if isDigit(b64Name[0]) {
-		// Turn "3foo" into "Dfoo".
-		// Similar to toLower, since uppercase letters go after digits
-		// in the ASCII table.
-		b64Name[0] += 'A' - '0'
+	// The first letter is always a lowercase consonant, so the name is a valid
+	// identifier. Valid identifiers should stay exported or unexported; a
+	// package path, which is not an identifier, stays unexported.
+	if token.IsIdentifier(name) && token.IsExported(name) {
+		hashName[0] = toUpper(hashName[0])
 	}
-	for i, b := range b64Name {
-		if b == '-' { // URL encoding uses dashes, which aren't valid
-			b64Name[i] = 'a'
-		}
-	}
-	// Valid identifiers should stay exported or unexported.
-	if token.IsIdentifier(name) {
-		if token.IsExported(name) {
-			if b64Name[0] == '_' {
-				// Turn "_foo" into "Zfoo".
-				b64Name[0] = 'Z'
-			} else if isLower(b64Name[0]) {
-				// Turn "afoo" into "Afoo".
-				b64Name[0] = toUpper(b64Name[0])
-			}
-		} else if isUpper(b64Name[0]) {
-			// Turn "Afoo" into "afoo".
-			b64Name[0] = toLower(b64Name[0])
-		}
-	}
-	return string(b64Name)
+	return string(hashName)
 }

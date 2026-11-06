@@ -126,17 +126,17 @@ func mainFunc() {
 		println(imported.ImportedVar)
 
 		// When we're obfuscating, check that the obfuscated name lengths vary.
-		// With sixteen hashed names, and a range of 7 (between 6 and 12),
-		// the chances of fourteen repeats are incredibly minuscule.
-		// If that happens, then our randomness is clearly broken.
+		// Names are 4 to 6 syllables, each 2 or 3 bytes, so 8 to 18 bytes.
+		// With sixteen hashed names the chances of fourteen repeats are
+		// incredibly minuscule. If that happens, our randomness is broken.
 		if hashedNames[0] != "main.hashed_00" {
-			var count [16]int
+			var count [19]int
 			for _, name := range hashedNames {
 				name = name[len("main."):]
-				if len(name) < 6 {
+				if len(name) < 8 {
 					panic("ended up with a hashed name that's too short: " + name)
 				}
-				if len(name) > 12 {
+				if len(name) > 18 {
 					panic("ended up with a hashed name that's too long: " + name)
 				}
 				count[len(name)]++

@@ -9,7 +9,6 @@ import (
 	"maps"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 
 	"golang.org/x/tools/go/ssa"
@@ -61,8 +60,6 @@ func reflectMainPrePatch(path string) (string, error) {
 	}
 	_, code, _ := strings.Cut(reflectAbiCode, "// Injected code below this line.")
 	code = strings.ReplaceAll(code, "//disabledgo:", "//go:")
-	// This constant is declared in our hash.go file.
-	code = strings.ReplaceAll(code, "minHashLength", strconv.Itoa(minHashLength))
 	return string(content) + code, nil
 }
 
